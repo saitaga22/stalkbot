@@ -4,13 +4,14 @@ A Discord.js v14 bot that monitors a specific member's presence within a guild, 
 
 ## Features
 
-- `!monitor @user` — start tracking a member and log updates in the invoking channel.
+- `!monitor @user` — start tracking a member and stream updates to the bot owner's DMs.
 - `!stopmonitor` — stop monitoring in the current guild.
 - `!status` — show total active time, latest status, and the most recent logged activity.
 - `!help` — display the available commands and what they do.
 - Tracks status transitions (online / idle / do-not-disturb / offline) and rich presence activities (games, streams, etc.).
 - Detects and announces custom status (activity type 4) changes, preserving them in the log history.
 - Supports English (default) and Turkish output; switch with `!setlang en|tr` and all bot messages follow suit.
+- Built-in Express keep-alive endpoint for free hosts—ping it from UptimeRobot (or similar) to keep the process awake.
 - Stores logs and accumulated online time in SQLite via `quick.db`, preserving data through restarts.
 
 ## Requirements
@@ -27,15 +28,18 @@ A Discord.js v14 bot that monitors a specific member's presence within a guild, 
    npm install
    ```
 
-2. Set your bot token. For local development you can use PowerShell:
+2. Copy `.env.example` to `.env` and fill in your token:
 
    ```powershell
-   $env:DISCORD_TOKEN = "your-bot-token"
+   Copy-Item .env.example .env
+   notepad .env
    ```
 
-   > Tip: add the token to a process manager or `.env` loader of your choice in production.
+   The file should contain `DISCORD_TOKEN=your-bot-token`. Restart the bot after any changes.
 
-3. Start the bot:
+3. (Optional) Override the keep-alive port by setting `KEEP_ALIVE_PORT` (defaults to `3000`).
+
+4. Start the bot:
 
    ```powershell
    npm start
@@ -43,8 +47,9 @@ A Discord.js v14 bot that monitors a specific member's presence within a guild, 
 
 ## Usage
 
-- Run `!monitor @User` in a text channel to begin monitoring that member. The bot stores the channel ID and sends all logs there.
+- Run `!monitor @User` in a text channel to begin monitoring that member. The bot saves the guild configuration and delivers all notifications to the owner via DM.
 - Use `!status` at any time to review the tracked totals and last activity snapshot.
+- A keep-alive server listens on `http://<host>:<port>/` (defaults to port `3000`) and responds with JSON `{ status: "ok" }`. Configure a monitoring service such as UptimeRobot to ping this URL every 5 minutes to keep the bot awake. The `/health` path returns `204` and can also be used for lightweight probes.
 - Custom statuses are announced automatically in the configured log channel (e.g. `💬 <@user> changed status: 'old' → 'new'`).
 - Run `!stopmonitor` to clear the monitoring setup for the guild.
 - Type `!help` to recall the command list inside Discord.
@@ -55,6 +60,7 @@ All history is capped at the 200 most recent entries per user under `logs.{userI
 ## File Overview
 
 - `index.js` — Discord client setup, command handling, presence tracking, and persistence helpers.
+- `keepAlive.js` — minimal Express server used for uptime pings.
 - `presence.sqlite` — generated automatically at runtime to persist monitoring data.
 
 ## Troubleshooting

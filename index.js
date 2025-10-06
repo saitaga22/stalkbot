@@ -1,5 +1,7 @@
 'use strict';
 
+require('dotenv').config();
+
 const path = require('path');
 const {
   ActivityType,
@@ -11,6 +13,7 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 const { QuickDB } = require('quick.db');
+const { startKeepAlive } = require('./keepAlive');
 
 const db = new QuickDB({ filePath: path.join(__dirname, 'presence.sqlite') });
 
@@ -849,11 +852,13 @@ process.on('SIGINT', async () => {
   }
 });
 
-const token = "OTAzMjk1NTE1MTE3MTA1MTUy.GJTD-m.xMJshE9Jx1IedDxQkHfU9KCFinTJtm-DMbhApU"
+const token = (process.env.DISCORD_TOKEN || process.env.BOT_TOKEN || '').trim();
 if (!token) {
   console.error('Missing DISCORD_TOKEN or BOT_TOKEN environment variable. Please set your bot token before starting.');
   process.exit(1);
 }
+
+startKeepAlive();
 
 client
   .login(token)
