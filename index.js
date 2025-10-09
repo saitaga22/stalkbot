@@ -4,7 +4,12 @@ require('dotenv').config();
 
 const path = require('path');
 const {
+  ActionRowBuilder,
+  AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ActivityType,
+  ComponentType,
   Client,
   EmbedBuilder,
   Events,
@@ -14,6 +19,8 @@ const {
 } = require('discord.js');
 const { QuickDB } = require('quick.db');
 const { startKeepAlive } = require('./keepAlive');
+const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
+const { registerables } = require('chart.js');
 
 const db = new QuickDB({ filePath: path.join(__dirname, 'presence.sqlite') });
 
@@ -22,6 +29,22 @@ const ACTIVE_STATUSES = new Set(['online', 'idle', 'dnd']);
 const DEFAULT_LANGUAGE = 'en';
 const SUPPORTED_LANGUAGES = new Set(['en', 'tr']);
 const BOT_OWNER_ID = '599189960725364747';
+const CUSTOM_PLAYING = process.env.CUSTOM_PLAYING?.trim();
+const ANALYTICS_MAX_DAYS = 30;
+const presenceSessions = new Map();
+const voiceSessions = new Map();
+const DAY_IN_MS = 86_400_000;
+const chartRenderer = new ChartJSNodeCanvas({
+  width: 900,
+  height: 420,
+  backgroundColour: '#0f172a',
+  chartCallback: (ChartJS) => {
+    ChartJS.register(...registerables);
+    ChartJS.defaults.color = '#e5e7eb';
+    ChartJS.defaults.font.family = 'Segoe UI, Helvetica Neue, Arial, sans-serif';
+    ChartJS.defaults.font.size = 14;
+  },
+});
 let ownerUserCache = null;
 
 const client = new Client({
@@ -29,6 +52,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
@@ -46,6 +70,7 @@ const translations = {
       prefixDescription: 'Command prefix: `!`',
       manageRequired: '❌ You need the **Manage Server** permission to configure monitoring.',
       manageRequiredLang: '❌ You need the **Manage Server** permission to change the bot language.',
+  ownerOnly: '❌ Only the bot owner can use this command.',
       mentionRequired: '⚠️ Please mention a user to monitor, e.g. `!monitor @username`.',
       monitoringNotConfigured: 'ℹ️ Monitoring is not configured for this server.',
       nothingMonitored: 'ℹ️ No user is currently being monitored in this server.',
@@ -53,6 +78,7 @@ const translations = {
       helpFooter: 'Presence Stalker Bot',
       languageAlreadySet: 'ℹ️ Language is already set to {language}.',
       languageMissingArgument: '⚠️ Please supply a language code (en/tr).',
+  deleteFailed: '❌ Failed to delete data. Please check the bot logs for details.',
     },
     help: {
       title: 'Presence Monitor Help',
@@ -60,16 +86,28 @@ const translations = {
       fields: {
   monitor: 'Admins only. Start monitoring a member and relay updates to the bot owner via DM.',
         stopmonitor: 'Admins only. Stop monitoring in this guild and clear the saved channel.',
-        status: "Show the monitored user's total active time, latest status, and last activity.",
-        help: 'Display this help message.',
-        setlang: 'Admins only. Switch between English and Turkish (e.g. `!setlang tr`).',
+  status: "Show the monitored user's total active time, latest status, and last activity.",
+  analytics: 'Admins only. View charts and rankings for recent activity (e.g. `!analytics 30 @user`).',
+  help: 'Display this help message.',
+  setlang: 'Admins only. Switch between English and Turkish (e.g. `!setlang tr`).',
       },
     },
     monitor: {
-      success: '✅ Now monitoring <@{userId}>. Presence updates will be sent to the bot owner via DM.',
+      prompt: 'Do you want me to send it in DMs?',
+      successDm: '✅ Now monitoring <@{userId}>. Updates will arrive via DM.',
+      successChannel: '✅ Now monitoring <@{userId}>. Updates will post in this channel.',
+      timeout: '⌛ Monitoring cancelled because no option was selected.',
+      notYourButtons: '❌ Only the admin who used the command can choose an option.',
+      buttons: {
+        dm: 'Yes, send in DM',
+        channel: 'No, send here',
+      },
     },
     stopmonitor: {
       success: '🛑 Monitoring disabled for this server.',
+    },
+    delete: {
+      confirm: '🧹 All monitoring data has been deleted.',
     },
     status: {
       embedTitle: 'Presence Monitor Status',
@@ -83,6 +121,25 @@ const translations = {
       },
       currentSessionValue: '{duration} (and counting)',
       noCustomStatus: 'None',
+    },
+    analytics: {
+      manageRequired: '❌ You need the **Manage Server** permission to view analytics.',
+      title: '{guild} analytics — {range}',
+      ranges: {
+        7: 'Last 7 days',
+        30: 'Last 30 days',
+      },
+      noData: 'Not enough data recorded yet.',
+      sections: {
+        activity: 'Top Active Users',
+        voice: 'Voice Channel Leaders',
+        messages: 'Top Messages in {channel}',
+      },
+      autoChannelNote: 'Showing busiest channel automatically: {channel}',
+      specificChannelNote: 'Channel: {channel}',
+      messageCount: '{count} messages',
+      noMessages: 'No message activity recorded for this range.',
+      footer: 'Analytics window: last 30 days of history.',
     },
     language: {
       invalid: '⚠️ Supported languages: {languages}.',
@@ -147,6 +204,7 @@ const translations = {
       prefixDescription: 'Komut ön eki: `!`',
       manageRequired: '❌ İzleme ayarlarını yapmak için **Sunucuyu Yönet** iznine ihtiyacınız var.',
       manageRequiredLang: '❌ Bot dilini değiştirmek için **Sunucuyu Yönet** iznine ihtiyacınız var.',
+  ownerOnly: '❌ Bu komutu yalnızca bot sahibi kullanabilir.',
       mentionRequired: '⚠️ Lütfen izlemek için bir kullanıcı etiketleyin, örn. `!monitor @kullanici`.',
       monitoringNotConfigured: 'ℹ️ Bu sunucuda izleme yapılandırılmadı.',
       nothingMonitored: 'ℹ️ Bu sunucuda şu anda izlenen bir kullanıcı yok.',
@@ -154,6 +212,7 @@ const translations = {
       helpFooter: 'Presence Stalker Bot',
       languageAlreadySet: 'ℹ️ Dil zaten {language} olarak ayarlı.',
       languageMissingArgument: '⚠️ Lütfen bir dil kodu belirtin (en/tr).',
+  deleteFailed: '❌ Veriler silinemedi. Ayrıntılar için bot günlüklerini kontrol edin.',
     },
     help: {
       title: 'Presence Monitor Yardımı',
@@ -161,16 +220,28 @@ const translations = {
       fields: {
   monitor: 'Sadece yöneticiler. Bir üyeyi izlemeye başlayın ve güncellemeleri bot sahibine DM olarak iletin.',
         stopmonitor: 'Sadece yöneticiler. Bu sunucuda izlemeyi durdurur ve kayıtlı kanalı temizler.',
-        status: 'İzlenen kullanıcının toplam aktif süresini, son durumunu ve son etkinliğini gösterir.',
-        help: 'Bu yardım mesajını gösterir.',
-        setlang: 'Sadece yöneticiler. İngilizce ve Türkçe arasında geçiş yapar (örn. `!setlang tr`).',
+  status: 'İzlenen kullanıcının toplam aktif süresini, son durumunu ve son etkinliğini gösterir.',
+  analytics: 'Sadece yöneticiler. Son etkinlik için grafik ve sıralamaları görüntüler (örn. `!analytics 30 @kullanıcı`).',
+  help: 'Bu yardım mesajını gösterir.',
+  setlang: 'Sadece yöneticiler. İngilizce ve Türkçe arasında geçiş yapar (örn. `!setlang tr`).',
       },
     },
     monitor: {
-      success: '✅ Artık <@{userId}> izleniyor. Durum güncellemeleri bot sahibine DM olarak gönderilecek.',
+      prompt: 'Güncellemeleri DM olarak göndermemi ister misiniz?',
+      successDm: '✅ Artık <@{userId}> izleniyor. Güncellemeler DM olarak gönderilecek.',
+      successChannel: '✅ Artık <@{userId}> izleniyor. Güncellemeler bu kanala gönderilecek.',
+      timeout: '⌛ Hiçbir seçenek seçilmediği için izleme iptal edildi.',
+      notYourButtons: '❌ Yalnızca komutu kullanan yönetici bir seçenek seçebilir.',
+      buttons: {
+        dm: 'Evet, DM olarak gönder',
+        channel: 'Hayır, buraya gönder',
+      },
     },
     stopmonitor: {
       success: '🛑 Bu sunucu için izleme devre dışı bırakıldı.',
+    },
+    delete: {
+      confirm: '🧹 Tüm izleme verileri silindi.',
     },
     status: {
       embedTitle: 'Presence Monitor Durumu',
@@ -184,6 +255,25 @@ const translations = {
       },
       currentSessionValue: '{duration} (devam ediyor)',
       noCustomStatus: 'Yok',
+    },
+    analytics: {
+      manageRequired: '❌ Analitikleri görüntülemek için **Sunucuyu Yönet** iznine ihtiyacınız var.',
+      title: '{guild} analitik — {range}',
+      ranges: {
+        7: 'Son 7 gün',
+        30: 'Son 30 gün',
+      },
+      noData: 'Bu aralık için yeterli veri yok.',
+      sections: {
+        activity: 'En Aktif Kullanıcılar',
+        voice: 'Ses Kanalı Liderleri',
+        messages: '{channel} kanalındaki mesaj liderleri',
+      },
+      autoChannelNote: 'En yoğun kanal otomatik seçildi: {channel}',
+      specificChannelNote: 'Kanal: {channel}',
+      messageCount: '{count} mesaj',
+      noMessages: 'Bu aralık için mesaj etkinliği yok.',
+      footer: 'Analitik kapsamı: Son 30 günlük geçmiş.',
     },
     language: {
       invalid: '⚠️ Desteklenen diller: {languages}.',
@@ -398,13 +488,479 @@ async function getOwnerUser() {
   }
 }
 
+function formatDateKey(timestamp) {
+  const date = new Date(timestamp);
+  const year = date.getUTCFullYear();
+  const month = `${date.getUTCMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getUTCDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function clampAnalyticsDays(days) {
+  if (Number.isNaN(Number(days))) return 7;
+  return Math.max(1, Math.min(ANALYTICS_MAX_DAYS, Number(days)));
+}
+
+function splitDurationByDay(start, end) {
+  if (!start || !end || end <= start) {
+    return [];
+  }
+
+  const segments = [];
+  let cursor = start;
+  while (cursor < end) {
+    const cursorDate = new Date(cursor);
+    const nextMidnight = Date.UTC(
+      cursorDate.getUTCFullYear(),
+      cursorDate.getUTCMonth(),
+      cursorDate.getUTCDate() + 1,
+      0,
+      0,
+      0,
+      0,
+    );
+    const segmentEnd = Math.min(end, nextMidnight);
+    segments.push({ date: formatDateKey(cursor), duration: segmentEnd - cursor });
+    cursor = segmentEnd;
+  }
+  return segments;
+}
+
+async function addDurationToAnalytics(type, guildId, userId, start, end) {
+  const segments = splitDurationByDay(start, end);
+  await Promise.all(
+    segments.map(async ({ date, duration }) => {
+      if (duration <= 0) return;
+      await db.add(`analytics.${type}.${guildId}.${userId}.${date}`, duration);
+    }),
+  );
+}
+
+async function addVoiceDuration(guildId, userId, channelId, start, end) {
+  const segments = splitDurationByDay(start, end);
+  await Promise.all(
+    segments.map(async ({ date, duration }) => {
+      if (duration <= 0) return;
+      const baseKey = `analytics.voice.${guildId}.${userId}.${date}`;
+      await db.add(baseKey, duration);
+      if (channelId) {
+        await db.add(`analytics.voiceChannels.${guildId}.${channelId}.${date}.${userId}`, duration);
+      }
+    }),
+  );
+}
+
+function presenceSessionKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
+function voiceSessionKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
+function presenceSessionStoreKey(guildId, userId) {
+  return `analytics.sessions.activity.${guildId}.${userId}`;
+}
+
+function voiceSessionStoreKey(guildId, userId) {
+  return `analytics.sessions.voice.${guildId}.${userId}`;
+}
+
+async function startPresenceSession(guildId, userId, start) {
+  const key = presenceSessionKey(guildId, userId);
+  if (!presenceSessions.has(key)) {
+    presenceSessions.set(key, start);
+    await db.set(presenceSessionStoreKey(guildId, userId), { start });
+  }
+}
+
+async function endPresenceSession(guildId, userId, end) {
+  const key = presenceSessionKey(guildId, userId);
+  let start = presenceSessions.get(key);
+  if (!start) {
+    const stored = await db.get(presenceSessionStoreKey(guildId, userId));
+    if (stored?.start) {
+      start = stored.start;
+    }
+  }
+
+  presenceSessions.delete(key);
+  await db.delete(presenceSessionStoreKey(guildId, userId));
+
+  if (start && end > start) {
+    await addDurationToAnalytics('activity', guildId, userId, start, end);
+  }
+}
+
+async function startVoiceSession(guildId, userId, channelId, start) {
+  const key = voiceSessionKey(guildId, userId);
+  const payload = { start, channelId };
+  voiceSessions.set(key, payload);
+  await db.set(voiceSessionStoreKey(guildId, userId), payload);
+}
+
+async function endVoiceSession(guildId, userId, fallbackChannelId, end) {
+  const key = voiceSessionKey(guildId, userId);
+  let session = voiceSessions.get(key);
+  if (!session) {
+    session = await db.get(voiceSessionStoreKey(guildId, userId));
+  }
+
+  voiceSessions.delete(key);
+  await db.delete(voiceSessionStoreKey(guildId, userId));
+
+  const start = session?.start;
+  const channelId = session?.channelId ?? fallbackChannelId;
+  if (start && end > start) {
+    await addVoiceDuration(guildId, userId, channelId, start, end);
+  }
+}
+
+async function incrementMessageCount(guildId, channelId, userId, timestamp) {
+  if (!guildId || !channelId || !userId) return;
+  const dateKey = formatDateKey(timestamp);
+  await db.add(`analytics.messages.${guildId}.${channelId}.${dateKey}.${userId}`, 1);
+}
+
+async function handlePresenceAnalytics(oldPresence, newPresence) {
+  const guild = newPresence?.guild ?? oldPresence?.guild;
+  if (!guild) return;
+
+  const userId = newPresence?.userId ?? oldPresence?.userId;
+  if (!userId || userId === client.user.id) {
+    return;
+  }
+
+  const oldStatus = oldPresence?.status ?? 'offline';
+  const newStatus = newPresence?.status ?? 'offline';
+  const wasActive = ACTIVE_STATUSES.has(oldStatus);
+  const isActive = ACTIVE_STATUSES.has(newStatus);
+  const now = Date.now();
+
+  if (isActive && !wasActive) {
+    await startPresenceSession(guild.id, userId, now);
+    return;
+  }
+
+  if (!isActive && wasActive) {
+    await endPresenceSession(guild.id, userId, now);
+    return;
+  }
+
+  const key = presenceSessionKey(guild.id, userId);
+  if (isActive && !presenceSessions.has(key)) {
+    await startPresenceSession(guild.id, userId, now);
+  }
+}
+
+async function handleVoiceAnalytics(oldState, newState) {
+  const guild = newState?.guild ?? oldState?.guild;
+  if (!guild) return;
+
+  const userId = newState?.id ?? oldState?.id;
+  if (!userId || userId === client.user.id) {
+    return;
+  }
+
+  const oldChannelId = oldState?.channelId ?? null;
+  const newChannelId = newState?.channelId ?? null;
+  const now = Date.now();
+
+  if (oldChannelId && oldChannelId !== newChannelId) {
+    await endVoiceSession(guild.id, userId, oldChannelId, now);
+  }
+
+  if (newChannelId && newChannelId !== oldChannelId) {
+    await startVoiceSession(guild.id, userId, newChannelId, now);
+  }
+
+  if (!newChannelId && !oldChannelId) {
+    const key = voiceSessionKey(guild.id, userId);
+    if (voiceSessions.has(key)) {
+      await endVoiceSession(guild.id, userId, voiceSessions.get(key)?.channelId ?? null, now);
+    }
+  }
+
+  if (newChannelId && newChannelId === oldChannelId) {
+    const key = voiceSessionKey(guild.id, userId);
+    if (!voiceSessions.has(key)) {
+      const stored = await db.get(voiceSessionStoreKey(guild.id, userId));
+      const start = stored?.start ?? now;
+      await startVoiceSession(guild.id, userId, newChannelId, start);
+    }
+  }
+}
+
+function getLocaleForLanguage(lang) {
+  return lang === 'tr' ? 'tr-TR' : 'en-US';
+}
+
+function buildRecentDateKeys(days) {
+  const normalized = clampAnalyticsDays(days);
+  const keys = [];
+  const now = Date.now();
+  for (let offset = normalized - 1; offset >= 0; offset -= 1) {
+    const timestamp = now - offset * DAY_IN_MS;
+    keys.push(formatDateKey(timestamp));
+  }
+  return keys;
+}
+
+function formatChartLabel(dateKey, lang) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const formatter = new Intl.DateTimeFormat(getLocaleForLanguage(lang), {
+    month: 'short',
+    day: 'numeric',
+  });
+  return formatter.format(new Date(Date.UTC(year, month - 1, day)));
+}
+
+function msToHours(ms) {
+  return Math.round((ms / 3_600_000) * 100) / 100;
+}
+
+function formatNumberPretty(value, lang) {
+  const locale = getLocaleForLanguage(lang);
+  return new Intl.NumberFormat(locale).format(Math.round(value));
+}
+
+function sumDurationsForDates(source = {}, dateKeys) {
+  return dateKeys.reduce((total, dateKey) => {
+    const value = source?.[dateKey];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return total + value;
+    }
+    return total;
+  }, 0);
+}
+
+async function getActivitySeries(guildId, userId, days) {
+  const dateKeys = buildRecentDateKeys(days);
+  const store = (await db.get(`analytics.activity.${guildId}.${userId}`)) ?? {};
+  const series = dateKeys.map((dateKey) => {
+    const value = store?.[dateKey];
+    return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  });
+  return { dateKeys, series };
+}
+
+async function getTopActivityUsers(guildId, days, limit = 5) {
+  const dateKeys = buildRecentDateKeys(days);
+  const store = (await db.get(`analytics.activity.${guildId}`)) ?? {};
+  const entries = Object.entries(store).map(([userId, value]) => ({
+    userId,
+    total: sumDurationsForDates(value, dateKeys),
+  }));
+  return entries
+    .filter((entry) => entry.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+}
+
+async function getTopVoiceUsers(guildId, days, limit = 5) {
+  const dateKeys = buildRecentDateKeys(days);
+  const store = (await db.get(`analytics.voice.${guildId}`)) ?? {};
+  const entries = Object.entries(store).map(([userId, value]) => ({
+    userId,
+    total: sumDurationsForDates(value, dateKeys),
+  }));
+  return entries
+    .filter((entry) => entry.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+}
+
+async function getMessageLeaderboard(guildId, days, requestedChannelId = null, limit = 5) {
+  const dateKeys = buildRecentDateKeys(days);
+  const store = (await db.get(`analytics.messages.${guildId}`)) ?? {};
+
+  let targetChannelId = requestedChannelId ?? null;
+  let targetChannelData = targetChannelId ? store?.[targetChannelId] ?? {} : null;
+  let targetTotal = 0;
+
+  const computeChannelTotal = (channelData = {}) =>
+    dateKeys.reduce((sum, dateKey) => {
+      const users = channelData?.[dateKey];
+      if (!users) return sum;
+      return (
+        sum +
+        Object.values(users).reduce((inner, value) => {
+          if (typeof value === 'number' && Number.isFinite(value)) {
+            return inner + value;
+          }
+          return inner;
+        }, 0)
+      );
+    }, 0);
+
+  if (!targetChannelId) {
+    for (const [channelId, channelData] of Object.entries(store)) {
+      const total = computeChannelTotal(channelData);
+      if (total > targetTotal) {
+        targetTotal = total;
+        targetChannelId = channelId;
+        targetChannelData = channelData;
+      }
+    }
+  } else {
+    targetTotal = computeChannelTotal(targetChannelData);
+  }
+
+  if (!targetChannelId) {
+    return null;
+  }
+
+  const perUser = new Map();
+  for (const dateKey of dateKeys) {
+    const users = targetChannelData?.[dateKey];
+    if (!users) continue;
+    for (const [userId, count] of Object.entries(users)) {
+      if (typeof count !== 'number' || !Number.isFinite(count)) continue;
+      perUser.set(userId, (perUser.get(userId) ?? 0) + count);
+    }
+  }
+
+  const leaders = Array.from(perUser.entries())
+    .map(([userId, total]) => ({ userId, total }))
+    .filter((entry) => entry.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+
+  return {
+    channelId: targetChannelId,
+    total: targetTotal,
+    leaders,
+    requested: Boolean(requestedChannelId),
+  };
+}
+
+async function resolveUserLabels(guild, userIds) {
+  const map = new Map();
+  const unique = Array.from(new Set(userIds));
+  await Promise.all(
+    unique.map(async (userId) => {
+      try {
+        const member =
+          guild.members.cache.get(userId) ?? (await guild.members.fetch(userId).catch(() => null));
+        if (member) {
+          map.set(userId, member.displayName);
+          return;
+        }
+      } catch (error) {
+        // ignore
+      }
+      try {
+        const user = await client.users.fetch(userId);
+        map.set(userId, user.username ?? user.tag ?? userId);
+      } catch (error) {
+        map.set(userId, userId);
+      }
+    }),
+  );
+  return map;
+}
+
+async function createActivityChartAttachment(userLabel, lang, dateKeys, seriesMs, days) {
+  const labels = dateKeys.map((date) => formatChartLabel(date, lang));
+  const dataPoints = seriesMs.map((ms) => msToHours(ms));
+  const totalHours = dataPoints.reduce((sum, value) => sum + value, 0);
+
+  const configuration = {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Active hours',
+          data: dataPoints,
+          borderColor: '#60a5fa',
+          backgroundColor: 'rgba(96,165,250,0.25)',
+          borderWidth: 3,
+          tension: 0.35,
+          fill: true,
+          pointRadius: 4,
+          pointBackgroundColor: '#93c5fd',
+        },
+      ],
+    },
+    options: {
+      responsive: false,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: false,
+        },
+        title: {
+          display: true,
+          text: `${userLabel} • ${days}-day activity (${totalHours.toFixed(1)}h)`,
+          color: '#f9fafb',
+          font: {
+            size: 20,
+            weight: '600',
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#cbd5f5',
+          },
+          grid: {
+            color: 'rgba(255,255,255,0.05)',
+          },
+        },
+        y: {
+          beginAtZero: true,
+          ticks: {
+            color: '#cbd5f5',
+            callback: (value) => `${value}h`,
+          },
+          grid: {
+            color: 'rgba(255,255,255,0.08)',
+          },
+        },
+      },
+    },
+  };
+
+  const buffer = await chartRenderer.renderToBuffer(configuration, 'image/png');
+  return new AttachmentBuilder(buffer, { name: `analytics-activity-${days}d.png` });
+}
+
 async function recordEvent(config, content) {
   const entry = await appendLog(config.userId, content);
   config.lastActivity = content;
   config.lastActivityAt = entry.timestamp;
 
+  const deliveryMode = config.deliveryMode ?? 'dm';
+
+  if (deliveryMode === 'channel' && config.channelId) {
+    try {
+      const channel =
+        client.channels.cache.get(config.channelId) ??
+        (await client.channels.fetch(config.channelId).catch(() => null));
+      if (channel && typeof channel.isTextBased === 'function' && channel.isTextBased()) {
+        await channel.send({ content });
+        return;
+      }
+    } catch (error) {
+      console.error('Failed to send log message to channel:', error);
+    }
+  }
+
+  const targetUserId = config.deliveryUserId ?? BOT_OWNER_ID;
+  if (targetUserId) {
+    try {
+      const user = await client.users.fetch(targetUserId);
+      await user.send({ content });
+      return;
+    } catch (error) {
+      console.error('Failed to send log DM:', error);
+    }
+  }
+
   const ownerUser = await getOwnerUser();
-  if (!ownerUser) {
+  if (!ownerUser || ownerUser.id === targetUserId) {
     return;
   }
 
@@ -542,6 +1098,17 @@ async function processCustomStatusChange(config, oldPresence, newPresence, lang)
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`✅ Logged in as ${readyClient.user.tag}`);
 
+  if (CUSTOM_PLAYING) {
+    try {
+      await readyClient.user.setPresence({
+        activities: [{ name: 'watching over the server', type: ActivityType.Playing }],
+      });
+      console.log(`🎮 Custom playing set to: ${CUSTOM_PLAYING}`);
+    } catch (error) {
+      console.error('Failed to set custom playing presence:', error);
+    }
+  }
+
   try {
     const entries = await db.all();
     const monitorEntries = entries.filter((entry) => entry.id.startsWith('monitor.'));
@@ -553,6 +1120,13 @@ client.once(Events.ClientReady, async (readyClient) => {
         const guild = readyClient.guilds.cache.get(guildId);
         if (!guild || !config.userId) {
           return;
+        }
+
+        if (!config.deliveryMode) {
+          config.deliveryMode = 'dm';
+        }
+        if (config.deliveryMode === 'dm' && !config.deliveryUserId) {
+          config.deliveryUserId = BOT_OWNER_ID;
         }
 
         const lang = safeLanguage(config.language) || (await getGuildLanguage(guildId));
@@ -581,12 +1155,74 @@ client.once(Events.ClientReady, async (readyClient) => {
         }
       }),
     );
+
+    const now = Date.now();
+    const activitySessions = entries.filter((entry) => entry.id.startsWith('analytics.sessions.activity.'));
+    await Promise.all(
+      activitySessions.map(async (entry) => {
+        const [, , , guildId, userId] = entry.id.split('.');
+        const start = entry.value?.start;
+        if (!guildId || !userId || !start) {
+          await db.delete(entry.id);
+          return;
+        }
+
+        const guild = readyClient.guilds.cache.get(guildId);
+        if (!guild) {
+          await db.delete(entry.id);
+          return;
+        }
+
+        const member =
+          guild.members.cache.get(userId) ?? (await guild.members.fetch(userId).catch(() => null));
+        const status = member?.presence?.status ?? 'offline';
+        if (ACTIVE_STATUSES.has(status)) {
+          presenceSessions.set(presenceSessionKey(guildId, userId), start);
+        } else {
+          await addDurationToAnalytics('activity', guildId, userId, start, now);
+          await db.delete(entry.id);
+        }
+      }),
+    );
+
+    const voiceSessionEntries = entries.filter((entry) => entry.id.startsWith('analytics.sessions.voice.'));
+    await Promise.all(
+      voiceSessionEntries.map(async (entry) => {
+        const [, , , guildId, userId] = entry.id.split('.');
+        const { start, channelId } = entry.value ?? {};
+        if (!guildId || !userId || !start || !channelId) {
+          await db.delete(entry.id);
+          return;
+        }
+
+        const guild = readyClient.guilds.cache.get(guildId);
+        if (!guild) {
+          await db.delete(entry.id);
+          return;
+        }
+
+        const member =
+          guild.members.cache.get(userId) ?? (await guild.members.fetch(userId).catch(() => null));
+        if (member?.voice?.channelId === channelId) {
+          voiceSessions.set(voiceSessionKey(guildId, userId), { start, channelId });
+        } else {
+          await addVoiceDuration(guildId, userId, channelId, start, now);
+          await db.delete(entry.id);
+        }
+      }),
+    );
   } catch (error) {
     console.error('Failed to refresh monitor state during startup:', error);
   }
 });
 
 client.on(Events.MessageCreate, async (message) => {
+  if (message.guild && !message.author.bot) {
+    incrementMessageCount(message.guild.id, message.channel.id, message.author.id, message.createdTimestamp ?? Date.now()).catch(
+      (error) => console.error('Failed to record message analytics:', error),
+    );
+  }
+
   if (!message.guild || message.author.bot || !message.content.startsWith(PREFIX)) {
     return;
   }
@@ -677,6 +1313,49 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('monitor_dm')
+        .setLabel(translate(lang, 'monitor.buttons.dm'))
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('monitor_channel')
+        .setLabel(translate(lang, 'monitor.buttons.channel'))
+        .setEmoji('❌')
+        .setStyle(ButtonStyle.Danger),
+    );
+
+    const promptMessage = await message.reply({
+      content: translate(lang, 'monitor.prompt'),
+      components: [row],
+    });
+
+    const filter = async (interaction) => {
+      if (interaction.user.id !== message.author.id) {
+        await interaction.reply({
+          content: translate(lang, 'monitor.notYourButtons'),
+          ephemeral: true,
+        });
+        return false;
+      }
+      return true;
+    };
+
+    const interaction = await promptMessage
+      .awaitMessageComponent({ filter, componentType: ComponentType.Button, time: 30_000 })
+      .catch(() => null);
+
+    if (!interaction) {
+      await promptMessage.edit({
+        content: translate(lang, 'monitor.timeout'),
+        components: [],
+      });
+      return;
+    }
+
+    const deliveryMode = interaction.customId === 'monitor_dm' ? 'dm' : 'channel';
+
     const config = {
       userId: target.id,
       channelId: message.channel.id,
@@ -688,15 +1367,19 @@ client.on(Events.MessageCreate, async (message) => {
       lastCustomStatus: null,
       lastCustomStatusAt: null,
       language: lang,
+      deliveryMode,
+      deliveryUserId: deliveryMode === 'dm' ? message.author.id : null,
     };
 
     await db.set(monitorKey(guildId), config);
 
-    await message.reply(
-      translate(lang, 'monitor.success', {
+    const successKey = deliveryMode === 'dm' ? 'monitor.successDm' : 'monitor.successChannel';
+    await interaction.update({
+      content: translate(lang, successKey, {
         userId: target.id,
       }),
-    );
+      components: [],
+    });
 
     return;
   }
@@ -716,6 +1399,158 @@ client.on(Events.MessageCreate, async (message) => {
 
     await db.delete(key);
     await message.reply(translate(lang, 'stopmonitor.success'));
+    return;
+  }
+
+  if (command === 'delete') {
+    if (message.author.id !== BOT_OWNER_ID) {
+      await message.reply(translate(lang, 'general.ownerOnly'));
+      return;
+    }
+
+    try {
+      await db.deleteAll();
+      presenceSessions.clear();
+      voiceSessions.clear();
+      await message.reply(translate(lang, 'delete.confirm'));
+    } catch (error) {
+      console.error('Failed to clear database:', error);
+      await message.reply(translate(lang, 'general.deleteFailed'));
+    }
+
+    return;
+  }
+
+  if (command === 'analytics') {
+    if (!message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      await message.reply(translate(lang, 'analytics.manageRequired'));
+      return;
+    }
+
+    let days = 7;
+    for (const arg of args) {
+      if (['7', '30'].includes(arg)) {
+        days = Number(arg);
+        break;
+      }
+    }
+    days = clampAnalyticsDays(days);
+
+    const targetUser = message.mentions.users.first() ?? message.author;
+    const requestedChannelMention = message.mentions.channels.first() ?? null;
+    const requestedChannelId = requestedChannelMention?.id ?? null;
+
+    const targetMember = await message.guild.members.fetch(targetUser.id).catch(() => null);
+    const userLabel = targetMember?.displayName ?? targetUser.tag ?? `<@${targetUser.id}>`;
+
+    const [activitySeries, topActive, topVoice, messageLeaderboard] = await Promise.all([
+      getActivitySeries(guildId, targetUser.id, days),
+      getTopActivityUsers(guildId, days, 5),
+      getTopVoiceUsers(guildId, days, 5),
+      getMessageLeaderboard(guildId, days, requestedChannelId, 5),
+    ]);
+
+    const chartAttachment = await createActivityChartAttachment(
+      userLabel,
+      lang,
+      activitySeries.dateKeys,
+      activitySeries.series,
+      days,
+    );
+
+    const userIdsForLabels = new Set([targetUser.id]);
+    for (const entry of topActive) userIdsForLabels.add(entry.userId);
+    for (const entry of topVoice) userIdsForLabels.add(entry.userId);
+    if (messageLeaderboard) {
+      for (const entry of messageLeaderboard.leaders) userIdsForLabels.add(entry.userId);
+    }
+
+    const labelMap = await resolveUserLabels(message.guild, Array.from(userIdsForLabels));
+
+    const activityFieldValue = topActive.length
+      ? topActive
+          .map((entry, index) => {
+            const name = labelMap.get(entry.userId) ?? `<@${entry.userId}>`;
+            return `**${index + 1}.** ${name} — ${formatDuration(entry.total, lang)}`;
+          })
+          .join('\n')
+      : translate(lang, 'analytics.noData');
+
+    const voiceFieldValue = topVoice.length
+      ? topVoice
+          .map((entry, index) => {
+            const name = labelMap.get(entry.userId) ?? `<@${entry.userId}>`;
+            return `**${index + 1}.** ${name} — ${formatDuration(entry.total, lang)}`;
+          })
+          .join('\n')
+      : translate(lang, 'analytics.noData');
+
+    let messageFieldName = translate(lang, 'analytics.sections.messages', {
+      channel: requestedChannelMention?.toString() ?? '#—',
+    });
+    let messageFieldValue = translate(lang, 'analytics.noMessages');
+    if (messageLeaderboard) {
+      const channel =
+        message.guild.channels.cache.get(messageLeaderboard.channelId) ??
+        (await message.guild.channels.fetch(messageLeaderboard.channelId).catch(() => null));
+      const channelDisplay = channel?.toString() ?? `#${messageLeaderboard.channelId}`;
+      messageFieldName = translate(lang, 'analytics.sections.messages', {
+        channel: channelDisplay,
+      });
+
+      if (messageLeaderboard.leaders.length) {
+        const noteKey = messageLeaderboard.requested
+          ? 'analytics.specificChannelNote'
+          : 'analytics.autoChannelNote';
+        const note = translate(lang, noteKey, { channel: channelDisplay });
+        const leaderText = messageLeaderboard.leaders
+          .map((entry, index) => {
+            const name = labelMap.get(entry.userId) ?? `<@${entry.userId}>`;
+            const formattedCount = formatNumberPretty(entry.total, lang);
+            return `**${index + 1}.** ${name} — ${translate(lang, 'analytics.messageCount', {
+              count: formattedCount,
+            })}`;
+          })
+          .join('\n');
+        messageFieldValue = `${leaderText}\n\n*${note}*`;
+      } else if (messageLeaderboard.requested) {
+        messageFieldValue = translate(lang, 'analytics.noMessages');
+      } else {
+        messageFieldValue = translate(lang, 'analytics.noMessages');
+      }
+    }
+
+    const rangeLabel =
+      translate(lang, `analytics.ranges.${days}`) ?? translate(DEFAULT_LANGUAGE, `analytics.ranges.${days}`) ?? `${days} days`;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x1f2937)
+      .setTitle(
+        translate(lang, 'analytics.title', {
+          guild: message.guild.name,
+          range: rangeLabel,
+        }),
+      )
+      .setDescription(`**${userLabel}** — ${rangeLabel}`)
+      .addFields(
+        {
+          name: translate(lang, 'analytics.sections.activity'),
+          value: activityFieldValue,
+        },
+        {
+          name: translate(lang, 'analytics.sections.voice'),
+          value: voiceFieldValue,
+        },
+        {
+          name: messageFieldName,
+          value: messageFieldValue,
+        },
+      )
+      .setFooter({ text: translate(lang, 'analytics.footer') })
+      .setImage(`attachment://${chartAttachment.name}`)
+      .setTimestamp();
+
+    await message.reply({ embeds: [embed], files: [chartAttachment] });
     return;
   }
 
@@ -788,10 +1623,20 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+  try {
+    await handleVoiceAnalytics(oldState, newState);
+  } catch (error) {
+    console.error('Error handling voice analytics:', error);
+  }
+});
+
 client.on(Events.PresenceUpdate, async (oldPresence, newPresence) => {
   try {
     const guild = newPresence?.guild ?? oldPresence?.guild;
     if (!guild) return;
+
+    await handlePresenceAnalytics(oldPresence, newPresence);
 
     const key = monitorKey(guild.id);
     const config = await db.get(key);
